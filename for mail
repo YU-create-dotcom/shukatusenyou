@@ -1,3 +1,26 @@
+/*
+【実行関数の使い分けメモ】
+
+■ 初回セットアップ（最初の1回だけ）
+rebuildJobHuntingEmailsOnce();
+
+・シート内容を全削除
+・前回実行日時をリセット
+・2026/4/1以降の対象メールを全件再取得
+
+■ 通常更新（2回目以降はこちら）
+importJobHuntingEmails();
+
+・前回実行日時以降の新着メールだけ追加
+・既存データは残したまま差分更新
+
+■ データがおかしい時の再構築
+rebuildJobHuntingEmailsOnce();
+
+■ トリガー設定する関数
+importJobHuntingEmails
+
+*/
 const SHEET_NAME = '就活管理';
 const SPREADSHEET_ID = '1cBRZsd6qF64l6pWNN0gFRaboZBDIOB2DCoJs8_aNNBc';
 const FIRST_SEARCH_DATE = '2026/4/1';
