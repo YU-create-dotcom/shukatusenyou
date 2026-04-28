@@ -1,0 +1,234 @@
+const SHEET_NAME = '就活管理';
+const SPREADSHEET_ID = '1cBRZsd6qF64l6pWNN0gFRaboZBDIOB2DCoJs8_aNNBc';
+const FIRST_SEARCH_DATE = '2026/4/1';
+const LAST_RUN_KEY = 'JOB_EMAIL_LAST_RUN_TIME';
+
+function rebuildJobHuntingEmailsOnce() {
+  PropertiesService.getScriptProperties().deleteProperty(LAST_RUN_KEY);
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
+
+  sheet.clearContents();
+  setupHeader(sheet);
+
+  importJobHuntingEmails(true);
+}
+
+function importJobHuntingEmails(isRebuild = false) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
+
+  setupHeader(sheet);
+
+  const props = PropertiesService.getScriptProperties();
+  const lastRunTime = props.getProperty(LAST_RUN_KEY);
+  const now = new Date();
+
+  let query;
+
+  if (!isRebuild && lastRunTime) {
+    const d = new Date(lastRunTime);
+    query = `after:${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} (label:inbox OR is:unread) (面接 OR 選考 OR ES OR 説明会 OR オファー OR インターン OR 選考直結)`;
+  } else {
+    query = `after:${FIRST_SEARCH_DATE} (label:inbox OR is:unread) (面接 OR 選考 OR ES OR 説明会 OR オファー OR インターン OR 選考直結)`;
+  }
+
+  const existingIds = getExistingMessageIds(sheet);
+  const threads = GmailApp.search(query, 0, 500);
+  const newRows = [];
+
+  threads.forEach(thread => {
+    // スレッド内の最新メールだけ取得して重複を防ぐ
+    const messages = thread.getMessages();
+    const message = messages[messages.length - 1];
+
+    const messageId = message.getId();
+    const date = message.getDate();
+
+    if (existingIds.has(messageId)) return;
+    if (!isRebuild && lastRunTime && date <= new Date(lastRunTime)) return;
+
+    const subject = message.getSubject();
+    const body = message.getPlainBody();
+    const text = subject + '\n' + body;
+
+    const gmailUrl = `https://mail.google.com/mail/u/0/#inbox/${thread.getId()}`;
+
+    newRows.push([
+      date,
+      extractCompanyName(subject, body),
+      subject,
+      classifyEmail(text),
+      extractDeadline(text),
+      makeSnippet(body),
+      gmailUrl,
+      messageId,
+      '未対応'
+    ]);
+  });
+
+  newRows.sort((a, b) => b[0] - a[0]);
+
+  if (newRows.length > 0) {
+    sheet.insertRowsAfter(1, newRows.length);
+    sheet.getRange(2, 1, newRows.length, 9).setValues(newRows);
+  }
+
+  formatJobHuntingSheet(sheet);
+  colorByDeadline(sheet);
+
+  props.setProperty(LAST_RUN_KEY, now.toISOString());
+}
+
+function setupHeader(sheet) {
+  const headers = [
+    '受信日',
+    '企業名',
+    '件名',
+    '分類',
+    '締切',
+    '本文抜粋',
+    'Gmailリンク',
+    'メッセージID',
+    '対応状況'
+  ];
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight('bold')
+    .setBackground('#d9ead3');
+
+  sheet.setFrozenRows(1);
+}
+
+function getExistingMessageIds(sheet) {
+  const lastRow = sheet.getLastRow();
+  const ids = new Set();
+
+  if (lastRow < 2) return ids;
+
+  const values = sheet.getRange(2, 8, lastRow - 1, 1).getValues();
+  values.forEach(row => {
+    if (row[0]) ids.add(String(row[0]));
+  });
+
+  return ids;
+}
+
+function classifyEmail(text) {
+  if (text.includes('面接')) return '面接';
+  if (text.includes('ES') || text.includes('エントリーシート')) return 'ES';
+  if (text.includes('説明会')) return '説明会';
+  if (text.includes('オファー')) return 'オファー';
+  if (text.includes('インターン')) return 'インターン';
+  if (text.includes('選考直結')) return '選考直結';
+  if (text.includes('選考')) return '選考';
+  return 'その他';
+}
+
+function extractCompanyName(subject, body) {
+  const text = subject + '\n' + body;
+
+  const patterns = [
+    /株式会社[^\s　、。]{1,20}/,
+    /[^\s　、。]{1,20}株式会社/,
+    /有限会社[^\s　、。]{1,20}/,
+    /[^\s　、。]{1,20}有限会社/
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[0];
+  }
+
+  return '';
+}
+
+function extractDeadline(text) {
+  // 「締切」「期限」「提出」「応募」などの近くにある日付だけ拾う
+  const keywordPattern = /(締切|期限|提出|応募|回答|予約|申込|エントリー)[\s\S]{0,40}?((\d{4})\/(\d{1,2})\/(\d{1,2})|(\d{1,2})\/(\d{1,2})|(\d{1,2})月(\d{1,2})日)/;
+  const match = text.match(keywordPattern);
+
+  if (!match) return '';
+
+  const dateText = match[2];
+
+  let year = 2026;
+  let month;
+  let day;
+
+  let m = dateText.match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+  if (m) {
+    year = Number(m[1]);
+    month = Number(m[2]);
+    day = Number(m[3]);
+    return new Date(year, month - 1, day);
+  }
+
+  m = dateText.match(/(\d{1,2})\/(\d{1,2})/);
+  if (m) {
+    month = Number(m[1]);
+    day = Number(m[2]);
+    return new Date(year, month - 1, day);
+  }
+
+  m = dateText.match(/(\d{1,2})月(\d{1,2})日/);
+  if (m) {
+    month = Number(m[1]);
+    day = Number(m[2]);
+    return new Date(year, month - 1, day);
+  }
+
+  return '';
+}
+
+function makeSnippet(body) {
+  return body
+    .replace(/\s+/g, ' ')
+    .replace(/https?:\/\/\S+/g, '')
+    .slice(0, 120);
+}
+
+function formatJobHuntingSheet(sheet) {
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow >= 2) {
+    sheet.getRange(2, 1, lastRow - 1, 1).setNumberFormat('yyyy/MM/dd HH:mm');
+    sheet.getRange(2, 5, lastRow - 1, 1).setNumberFormat('yyyy/MM/dd');
+  }
+
+  // 列幅は自動調整しない
+}
+
+function colorByDeadline(sheet) {
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 2) return;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+
+  values.forEach((row, index) => {
+    const deadline = row[4];
+    const range = sheet.getRange(index + 2, 1, 1, lastCol);
+
+    range.setBackground(null);
+
+    if (deadline instanceof Date) {
+      const diffDays = Math.ceil((deadline - today) / (1000 * 60 * 60 * 24));
+
+      if (diffDays < 0) {
+        range.setBackground('#d9d9d9');
+      } else if (diffDays <= 1) {
+        range.setBackground('#f4cccc');
+      } else if (diffDays <= 3) {
+        range.setBackground('#fff2cc');
+      }
+    }
+  });
+}
